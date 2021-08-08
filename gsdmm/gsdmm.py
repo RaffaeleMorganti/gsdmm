@@ -1,12 +1,14 @@
+from warnings import warn
 import numpy as np
 from sklearn.feature_extraction.text import CountVectorizer
+
+_GSDMM_IMPORT_MISSING = {"WORDCLOUD": False}
 
 try:
     from wordcloud import WordCloud
     import matplotlib.pyplot as plt
 except ImportError:
-    print("""NOTE: The gsdmm.wordcloud() method requires extra libraries to be installed: wordcloud.
-    You can install these using pip install gsdmm[plot]. All other methods are still available.""")
+    _GSDMM_IMPORT_MISSING["WORDCLOUD"] = True
 
 
 class GSDMM:
@@ -45,9 +47,9 @@ class GSDMM:
         self.__tokenizer = None
         self.__number_docs = None
         self.__vocab = None
-        self.__cluster_doc_count = None
-        self.__cluster_word_count = None
-        self.__cluster_word_distribution = None
+        self.__clust_doc_count = None
+        self.__clust_word_count = None
+        self.__clust_word_distr = None
 
     def get_params(self):
         '''
@@ -69,6 +71,22 @@ class GSDMM:
         doc = np.array(self.__tokenizer(doc))
         return doc[np.isin(doc, self.__vocab)]
 
+    def __clust_add(self, k, d):
+        self.__clust_doc_count[k] += 1
+        self.__clust_word_count[k] += len(d)
+        for w in d:
+            if w not in self.__clust_word_distr[k]:
+                self.__clust_word_distr[k][w] = 0
+            self.__clust_word_distr[k][w] += 1
+
+    def __clust_del(self, k, d):
+        self.__clust_doc_count[k] -= 1
+        self.__clust_word_count[k] -= len(d)
+        for w in d:
+            self.__clust_word_distr[k][w] -= 1
+            if self.__clust_word_distr[k][w] == 0:
+                del self.__clust_word_distr[k][w]
+
     def fit(self, docs):
         '''
         Cluster the input documents and return fitted clusters
@@ -78,12 +96,9 @@ class GSDMM:
         '''
 
         # setup variables
-        self.__cluster_doc_count = np.zeros(self.__K, int)
-        self.__cluster_word_count = np.zeros(self.__K, int)
-        self.__cluster_word_distribution = np.array([{} for _ in range(self.__K)])
-
-        # unpack to easy var names
-        mz, nz, nzw = self.__cluster_doc_count, self.__cluster_word_count, self.__cluster_word_distribution
+        self.__clust_doc_count = np.zeros(self.__K, int)
+        self.__clust_word_count = np.zeros(self.__K, int)
+        self.__clust_word_distr = np.array([{} for _ in range(self.__K)])
 
         # setup tokenizer
         self.__vectorizer.fit(docs)
@@ -94,62 +109,36 @@ class GSDMM:
 
         self.__number_docs = len(docs)
 
-        # initialize the clusters
         # choose a random  initial cluster for the docs
         dz = self.__rng.integers(self.__K, size=self.__number_docs)
 
-        for i, doc in enumerate(docs):
-            z = dz[i]
-            mz[z] += 1
-            nz[z] += len(doc)
-
-            for word in doc:
-                if word not in nzw[z]:
-                    nzw[z][word] = 0
-                nzw[z][word] += 1
-
+        # initialize the clusters
+        for k, doc in enumerate(docs):
+            self.__clust_add(dz[k], doc)
         if self.__verbose:
             print("Model initialized")
 
-        for _iter in range(self.__n_iters):
-            total_transfers = 0
-
-            for i, doc in enumerate(docs):
-
+        for i in range(self.__n_iters):
+            trans = 0
+            for k, doc in enumerate(docs):
                 # remove the doc from it's current cluster
-                z_old = dz[i]
-
-                mz[z_old] -= 1
-                nz[z_old] -= len(doc)
-
-                for word in doc:
-                    nzw[z_old][word] -= 1
-
-                    # compact dictionary to save space
-                    if nzw[z_old][word] == 0:
-                        del nzw[z_old][word]
+                z_old = dz[k]
+                self.__clust_del(z_old, doc)
 
                 # draw sample from distribution to find new cluster
                 z_new = self.__rng.multinomial(1, self.__score(doc)).argmax()
 
+                dz[k] = z_new
+                self.__clust_add(z_new, doc)
+
                 # transfer doc to the new cluster
                 if z_new != z_old:
-                    total_transfers += 1
-
-                dz[i] = z_new
-                mz[z_new] += 1
-                nz[z_new] += len(doc)
-
-                for word in doc:
-                    if word not in nzw[z_new]:
-                        nzw[z_new][word] = 0
-                    nzw[z_new][word] += 1
+                    trans += 1
 
             if self.__verbose:
-                print("Stage %d: transferred %d documents (%d clusters populated)" %
-                      (_iter + 1, total_transfers, sum(mz > 0)))
+                print("Step %d: moved %d documents (%d clusters populated)" %
+                      (i + 1, trans, sum(self.__clust_doc_count > 0)))
 
-        self.__cluster_word_distribution = nzw
         return dz
 
     def __score(self, doc):
@@ -159,7 +148,6 @@ class GSDMM:
         :return: list[float]: A length K probability vector where each component represents
                               the probability of the document appearing in a particular cluster
         '''
-        mz, nz, nzw = self.__cluster_doc_count, self.__cluster_word_count, self.__cluster_word_distribution
 
         p = np.zeros(self.__K)
         size_range = np.arange(len(doc))
@@ -172,19 +160,19 @@ class GSDMM:
         # lN2 = log(product(nzw[w] + beta)) = sum(log(nzw[w] + beta))
         # lD2 = log(product(nz[d] + V*beta + i -1)) = sum(log(nz[d] + V*beta + i -1))
 
-        lN1 = np.log(mz + self.__alpha)
+        lN1 = np.log(self.__clust_doc_count + self.__alpha)
         lD1 = np.log(self.__number_docs - 1 + self.__K * self.__alpha)
         lN2 = np.zeros(self.__K)
         lD2 = np.zeros(self.__K)
 
         for i in range(self.__K):
-            lD2[i] = np.log(nz[i] + v * self.__beta + size_range).sum()
-            lN2[i] = np.sum([np.log(nzw[i].get(word, 0) + self.__beta) for word in doc])
+            lD2[i] = np.log(self.__clust_word_count[i] + v * self.__beta + size_range).sum()
+            lN2[i] = np.sum([np.log(self.__clust_word_distr[i].get(w, 0) + self.__beta) for w in doc])
 
         p = np.exp(lN1 - lD1 + lN2 - lD2)
 
         # normalize the probability vector
-        return np.nan_to_num(p / sum(p))
+        return p / max(sum(p), 1e-300)
 
     def predict_proba(self, docs):
         '''
@@ -211,7 +199,7 @@ class GSDMM:
         :return: list of dict
           for each cluster dict: word importances
         '''
-        nzw = self.__cluster_word_distribution
+        nzw = self.__clust_word_distr
         phi = np.array([{} for _ in range(self.__K)])
 
         v = len(self.__vocab)
@@ -230,23 +218,23 @@ class GSDMM:
         :return: list of dict
           for each cluster dict: word importances
         '''
-        s = np.array(self.__vocab)
-        v = len(self.__vocab)
+        v = np.array(self.__vocab)
+        s = len(self.__vocab)
         r = np.array([{} for _ in range(self.__K)])
 
         imp = self.get_importances()
 
-        o = np.zeros((v, self.__K))
+        o = np.zeros((s, self.__K))
         for i in range(self.__K):
             o[[self.__vocab.index(k) for k in imp[i].keys()], i] = list(imp[i].values())
 
-        m = o.sum(1).reshape((v, 1))
+        m = o.sum(1).reshape((s, 1))
 
         o += (o - m) / (self.__K - 1)
 
         for i in range(self.__K):
-            pos = o[:, i] > 0
-            r[i] = dict(sorted(zip(np.array(s)[pos], o[:, i][pos]), key=lambda x: x[1], reverse=True))
+            f = o[:, i] > 0
+            r[i] = dict(sorted(zip(np.array(v)[f], o[:, i][f]), key=lambda x: x[1], reverse=True))
 
         return r
 
@@ -258,8 +246,8 @@ class GSDMM:
             docs into cluster ratio
             words into cluster ratio
         '''
-        docs = self.__cluster_doc_count / self.__number_docs
-        words = self.__cluster_word_count / sum(self.__cluster_word_count)
+        docs = self.__clust_doc_count / self.__number_docs
+        words = self.__clust_word_count / sum(self.__clust_word_count)
 
         return np.c_[docs, words]
 
@@ -276,6 +264,11 @@ class GSDMM:
             dict of figure args (see matplotlib.pyplot.figure)
         :return: matplotlib.pyplot.figure
         '''
+        if _GSDMM_IMPORT_MISSING["WORDCLOUD"]:
+            warn("\nNOTE: The gsdmm.wordcloud() method requires extra libraries to be installed."
+                 "\nYou must install wordcloud, matplotlib (you can use 'pip install gsdmm[plot]')")
+            return None
+
         wc = WordCloud(**cloud)
         fig, axs = plt.subplots(int(np.ceil(self.__K / ncol)), ncol, **plot)
         axs = np.array(axs).reshape(-1)

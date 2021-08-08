@@ -62,6 +62,7 @@ def test_wordclouds():
     model = GSDMM(clust=2, seed=0)
     model.fit(texts)
     imp = model.get_avg_importances()
+    fig = model.get_wordclouds(imp)
 
-    # should not raise errors
-    model.get_wordclouds(imp)
+    # should return a figure
+    ut.assertIsNotNone(fig)
