@@ -1,102 +1,67 @@
+from gsdmm import GSDMM
+
 from unittest import TestCase
-from gsdmm.mgp import MovieGroupProcess
-import numpy
+from numpy import testing as nt
 
-class TestGSDMM(TestCase):
-    '''This class tests the Panel data structures needed to support the RSK model'''
+ut = TestCase()
 
-    def setUp(self):
-        numpy.random.seed(47)
 
-    def tearDown(self):
-        numpy.random.seed(None)
+def test_params():
+    # get_params should return GSDMM call params
+    model = GSDMM(clust=3, n_iters=10, seed=0, ngram_range=(1, 2))
+    pars = model.get_params()
 
-    def compute_V(self, texts):
-        V = set()
-        for text in texts:
-            for word in text:
-                V.add(word)
-        return len(V)
+    ut.assertEqual(pars["token"]["ngram_range"], (1, 2))
+    del pars["token"]
+    args = {'clust': 3, 'alpha': 0.1, 'beta': 0.1, 'iters': 10, 'seed': 0}
+    ut.assertDictEqual(pars, args)
 
-    def test_grades(self):
 
-        grades = list(map(list, [
-            "A",
-            "A",
-            "A",
-            "B",
-            "B",
-            "B",
-            "B",
-            "C",
-            "C",
-            "C",
-            "C",
-            "C",
-            "C",
-            "C",
-            "C",
-            "C",
-            "C",
-            "D",
-            "D",
-            "F",
-            "F",
-            "P",
-            "W"
-        ]))
-
-        grades = grades + grades + grades + grades + grades
-        mgp = MovieGroupProcess(K=100, n_iters=100, alpha=0.001, beta=0.01)
-        y = mgp.fit(grades, self.compute_V(grades))
-        self.assertEqual(len(set(y)), 7)
-        for words in mgp.cluster_word_distribution:
-            self.assertTrue(len(words) in {0,1}, "More than one grade ended up in a cluster!")
-            
-    def test_simple_example(self):
-        # example from @spattanayak1
-
-        docs=[['house',
-        'burning',
-        'need',
-        'fire',
-        'truck',
-        'ml',
-        'hindu',
-        'response',
-        'christian',
-        'conversion',
-        'alm']]
-
-        mgp = MovieGroupProcess(K=10, alpha=0.1, beta=0.1, n_iters=30)
-
-        vocab = set(x for doc in docs for x in doc)
-        n_terms = len(vocab)
-        n_docs = len(docs)
-
-        y = mgp.fit(docs, n_terms)
-
-    def test_short_text(self):
-        # there is no perfect segmentation of this text data:
-        texts = [
-            "where the red dog lives",
-            "red dog lives in the house",
-            "blue cat eats mice",
-            "monkeys hate cat but love trees",
-            "green cat eats mice",
-            "orange elephant never forgets",
-            "orange elephant must forget",
-            "monkeys eat banana",
-            "monkeys live in trees",
-            "elephant",
-            "cat",
-            "dog",
-            "monkeys"
+def test_model():
+    texts = [
+            "apples are red",
+            "apples are green",
+            "the sky is really dark",
+            "this is a good idea"
         ]
 
-        texts = [text.split() for text in texts]
-        V = self.compute_V(texts)
-        mgp = MovieGroupProcess(K=30, n_iters=100, alpha=0.2, beta=0.01)
-        y = mgp.fit(texts, V)
-        self.assertTrue(len(set(y))<10)
-        self.assertTrue(len(set(y))>3)
+    model = GSDMM(seed=0)
+    fit = model.fit(texts)
+    pred1 = model.predict_proba(texts).argmax(1)
+    pred2 = model.predict(texts)
+    info = model.get_clust_info()
+    imp1 = model.get_importances()
+    imp2 = model.get_avg_importances()
+
+    # text should be clustered in a, a, b, c
+    ut.assertEqual(fit[0], fit[1])
+    ut.assertNotEqual(fit[0], fit[2])
+    ut.assertNotEqual(fit[0], fit[3])
+
+    # predict and fit on same text must be equal
+    nt.assert_array_equal(pred1, pred2)
+    nt.assert_array_equal(fit, pred2)
+
+    # should have 2 cluster with 25% of  docs and 1 with 50%
+    ut.assertEqual(sum(info[:, 0] == 0.25), 2)
+    ut.assertEqual(sum(info[:, 0] == 0.5), 1)
+
+    # two importance methods should return same keys
+    for i in range(10):
+        ut.assertEqual(imp1[i].keys(), imp2[i].keys())
+
+
+def test_wordclouds():
+    texts = [
+            "apples are red",
+            "apples are green",
+            "the sky is really dark",
+            "this is a good idea"
+        ]
+
+    model = GSDMM(clust=2, seed=0)
+    model.fit(texts)
+    imp = model.get_avg_importances()
+
+    # should not raise errors
+    model.get_wordclouds(imp)

@@ -1,1 +1,1 @@
-from .mgp import MovieGroupProcess
+from .gsdmm import GSDMM

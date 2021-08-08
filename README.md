@@ -7,9 +7,8 @@ Some advantages of this algorithm:
  - With good parameter selection, the model converges quickly
  - Space efficient and scalable
 
-This project is an easy to read reference implementation of GSDMM -- I don't plan to maintain it unless there is demand. I am however actively maintaining the much faster Rust version of GSDMM [here](https://github.com/rwalk/gsdmm-rust).
-
 ## The Movie Group Process
+
 In their paper, the authors introduce a simple conceptual model for explaining the GSDMM called the Movie Group Process.
 
 Imagine a professor is leading a film class. At the start of the class, the students
@@ -23,17 +22,38 @@ the student must select a new table satisfying one or both of the following cond
 By following these steps consistently, we might expect that the students eventually arrive at an "optimal" table configuration.
 
 ## Usage
-To use a Movie Group Process to cluster short texts, first initialize a [MovieGroupProcess](gsdmm/mgp.py):
-```python
-from gsdmm import MovieGroupProcess
-mgp = MovieGroupProcess(K=8, alpha=0.1, beta=0.1, n_iters=30)
-```
-It's important to always choose `K` to be larger than the number of clusters you expect exist in your data, as the algorithm
-can never return more than `K` clusters.
 
-To fit the model:
-```python
-y = mgp.fit(docs)
+### install
 ```
-Each doc in `docs` must be a unique list of tokens found in your short text document. This implementation does not support
-counting tokens with multiplicity (which generally has little value in short text documents).
+pip install git+https://github.com/RaffaeleMorganti/gsdmm.git
+```
+
+### use
+```python
+from gsdmm import GSDMM
+gsdmm = GSDMM()
+
+texts = [
+		"where the red dog lives",
+		"red dog lives in the house",
+		"blue cat eats mice",
+		"monkeys hate cat but love trees",
+		"green cat eats mice",
+		"orange elephant must forget",
+		"monkeys eat banana",
+		"monkeys live in trees"
+	]
+
+clust = gsdmm.fit(texts)
+```
+
+### other
+```python
+prob = gsdmm.predict_proba(texts)
+pred = gsdmm.predict(texts)
+imp1 = gsdmm.get_importances()
+imp2 = gsdmm.get_avg_importances()
+info = gsdmm.get_clust_info()
+pars = gsdmm.get_params()
+plot = gsdmm.get_wordclouds(imp1)
+```
