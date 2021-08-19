@@ -34,15 +34,15 @@ from gsdmm import GSDMM
 gsdmm = GSDMM()
 
 texts = [
-		"where the red dog lives",
-		"red dog lives in the house",
-		"blue cat eats mice",
-		"monkeys hate cat but love trees",
-		"green cat eats mice",
-		"orange elephant must forget",
-		"monkeys eat banana",
-		"monkeys live in trees"
-	]
+        "where the red dog lives",
+        "red dog lives in the house",
+        "blue cat eats mice",
+        "monkeys hate cat but love trees",
+        "green cat eats mice",
+        "orange elephant must forget",
+        "monkeys eat banana",
+        "monkeys live in trees"
+    ]
 
 clust = gsdmm.fit(texts)
 ```

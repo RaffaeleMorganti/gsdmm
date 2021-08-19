@@ -47,9 +47,11 @@ class GSDMM:
         self.__tokenizer = None
         self.__number_docs = None
         self.__vocab = None
+        self.__voc_len = None
         self.__clust_doc_count = None
         self.__clust_word_count = None
-        self.__clust_word_distr = None
+        self.__vocab_indexer = None
+        self.__train_matrix = None
 
     def get_params(self):
         '''
@@ -64,28 +66,32 @@ class GSDMM:
             'token': self.__vectorizer.get_params()
         }
 
-    def __tokenize(self, doc):
+    def __vocab_index(self, token, add=False):
         '''
-        tokenize document using CountVectorizer
+        return token position in vocab [store in dict and do in O(1)]
+        '''
+        if token not in self.__vocab_indexer:
+            if not add:
+                return -1
+            self.__vocab_indexer[token] = int(np.where(self.__vocab == token)[0])
+        return self.__vocab_indexer[token]
+
+    def __tokenize(self, doc, add=False):
+        '''
+        tokenize document using CountVectorizer and return index position
         '''
         doc = np.array(self.__tokenizer(doc))
-        return doc[np.isin(doc, self.__vocab)]
+        return np.array([self.__vocab_index(t, add) for t in doc[np.isin(doc, self.__vocab)]])
 
-    def __clust_add(self, k, d):
+    def __clust_add(self, k, d, s):
         self.__clust_doc_count[k] += 1
-        self.__clust_word_count[k] += len(d)
-        for w in d:
-            if w not in self.__clust_word_distr[k]:
-                self.__clust_word_distr[k][w] = 0
-            self.__clust_word_distr[k][w] += 1
+        self.__clust_word_count[k] += s
+        self.__train_matrix[k, :] += d
 
-    def __clust_del(self, k, d):
+    def __clust_del(self, k, d, s):
         self.__clust_doc_count[k] -= 1
-        self.__clust_word_count[k] -= len(d)
-        for w in d:
-            self.__clust_word_distr[k][w] -= 1
-            if self.__clust_word_distr[k][w] == 0:
-                del self.__clust_word_distr[k][w]
+        self.__clust_word_count[k] -= s
+        self.__train_matrix[k, :] -= d
 
     def fit(self, docs):
         '''
@@ -98,38 +104,41 @@ class GSDMM:
         # setup variables
         self.__clust_doc_count = np.zeros(self.__K, int)
         self.__clust_word_count = np.zeros(self.__K, int)
-        self.__clust_word_distr = np.array([{} for _ in range(self.__K)])
 
         # setup tokenizer
-        self.__vectorizer.fit(docs)
+        td_matrix = self.__vectorizer.fit_transform(docs).toarray()
         self.__tokenizer = self.__vectorizer.build_analyzer()
-        self.__vocab = self.__vectorizer.get_feature_names()
-
-        docs = [self.__tokenize(doc) for doc in docs]
+        self.__vocab = np.array(self.__vectorizer.get_feature_names())
+        self.__voc_len = len(self.__vocab)
+        self.__train_matrix = np.zeros((self.__K, self.__voc_len))
+        self.__vocab_indexer = {}
 
         self.__number_docs = len(docs)
+        doc_t_count = td_matrix.sum(1)
+        doc_t_list = [0] * self.__number_docs
 
         # choose a random  initial cluster for the docs
         dz = self.__rng.integers(self.__K, size=self.__number_docs)
-
         # initialize the clusters
-        for k, doc in enumerate(docs):
-            self.__clust_add(dz[k], doc)
+
+        for k in range(self.__number_docs):
+            doc_t_list[k] = self.__tokenize(docs[k], True)
+            self.__clust_add(dz[k], td_matrix[k, :], doc_t_count[k])
+
         if self.__verbose:
             print("Model initialized")
-
         for i in range(self.__n_iters):
             trans = 0
-            for k, doc in enumerate(docs):
+            for k in range(self.__number_docs):
                 # remove the doc from it's current cluster
                 z_old = dz[k]
-                self.__clust_del(z_old, doc)
+                self.__clust_del(z_old, td_matrix[k, :], doc_t_count[k])
 
                 # draw sample from distribution to find new cluster
-                z_new = self.__rng.multinomial(1, self.__score(doc)).argmax()
+                z_new = self.__rng.multinomial(1, self.__score(doc_t_count[k], doc_t_list[k])).argmax()
 
                 dz[k] = z_new
-                self.__clust_add(z_new, doc)
+                self.__clust_add(z_new, td_matrix[k, :], doc_t_count[k])
 
                 # transfer doc to the new cluster
                 if z_new != z_old:
@@ -141,17 +150,16 @@ class GSDMM:
 
         return dz
 
-    def __score(self, doc):
+    def __score(self, ntok, pos):
         '''
         Score a document (Implements formula (3) of Yin and Wang 2014)
-        :param docs: list[str]: list of tokens
+        :param ntok: int: number of tokens
+        :param pos: list[int]: index of tokens in vocab
         :return: list[float]: A length K probability vector where each component represents
                               the probability of the document appearing in a particular cluster
         '''
 
-        p = np.zeros(self.__K)
-        size_range = np.arange(len(doc))
-        v = len(self.__vocab)
+        size_range = np.arange(ntok).reshape((ntok, 1))
 
         # We break the formula into the following pieces
         # p = N1*N2/(D1*D2) = exp(lN1 - lD1 + lN2 - lD2)
@@ -159,15 +167,13 @@ class GSDMM:
         # lN2 = log(D - 1 + K*alpha)
         # lN2 = log(product(nzw[w] + beta)) = sum(log(nzw[w] + beta))
         # lD2 = log(product(nz[d] + V*beta + i -1)) = sum(log(nz[d] + V*beta + i -1))
-
         lN1 = np.log(self.__clust_doc_count + self.__alpha)
         lD1 = np.log(self.__number_docs - 1 + self.__K * self.__alpha)
-        lN2 = np.zeros(self.__K)
-        lD2 = np.zeros(self.__K)
-
-        for i in range(self.__K):
-            lD2[i] = np.log(self.__clust_word_count[i] + v * self.__beta + size_range).sum()
-            lN2[i] = np.sum([np.log(self.__clust_word_distr[i].get(w, 0) + self.__beta) for w in doc])
+        lD2 = np.log(self.__clust_word_count + self.__voc_len * self.__beta + size_range).sum(0)
+        if len(pos) != 0:
+            lN2 = np.log(self.__train_matrix[:, pos] + self.__beta).sum(1)
+        else:
+            lN2 = np.zeros((self.__K,))
 
         p = np.exp(lN1 - lD1 + lN2 - lD2)
 
@@ -182,8 +188,9 @@ class GSDMM:
             A list with length n docs, each as K probability vector where each component
             represents the probability of the document appearing in a particular cluster
         '''
-        docs = [self.__tokenize(doc) for doc in docs]
-        return np.array([self.__score(doc) for doc in docs])
+        doc_t_count = self.__vectorizer.transform(docs).toarray().sum(1)
+        doc_t_list = [self.__tokenize(docs[k]) for k in range(len(docs))]
+        return np.array([self.__score(doc_t_count[k], doc_t_list[k]) for k in range(len(docs))])
 
     def predict(self, docs):
         '''
@@ -199,15 +206,15 @@ class GSDMM:
         :return: list of dict
           for each cluster dict: word importances
         '''
-        nzw = self.__clust_word_distr
+        n = self.__train_matrix + self.__beta
+        n[n == self.__beta] = 0
+        d = self.__train_matrix.sum(1) + self.__voc_len * self.__beta
+        r = n / d.reshape((self.__K, 1))
+
         phi = np.array([{} for _ in range(self.__K)])
-
-        v = len(self.__vocab)
         for z in range(self.__K):
-            d = sum(nzw[z].values()) + v * self.__beta
-            n = np.fromiter(nzw[z].values(), float) + self.__beta
-            phi[z] = dict(sorted(zip(nzw[z].keys(), n / d), key=lambda x: x[1], reverse=True))
-
+            pos = r[z, :] > 0
+            phi[z] = dict(sorted(zip(self.__vocab[pos], r[z, pos]), key=lambda x: x[1], reverse=True))
         return phi
 
     def get_avg_importances(self):
@@ -218,25 +225,18 @@ class GSDMM:
         :return: list of dict
           for each cluster dict: word importances
         '''
-        v = np.array(self.__vocab)
-        s = len(self.__vocab)
-        r = np.array([{} for _ in range(self.__K)])
+        n = self.__train_matrix + self.__beta
+        n[n == self.__beta] = 0
+        d = self.__train_matrix.sum(1) + self.__voc_len * self.__beta
+        o = n / d.reshape((self.__K, 1))
 
-        imp = self.get_importances()
+        o += (o - o.sum(0)) / (self.__K - 1)
 
-        o = np.zeros((s, self.__K))
-        for i in range(self.__K):
-            o[[self.__vocab.index(k) for k in imp[i].keys()], i] = list(imp[i].values())
-
-        m = o.sum(1).reshape((s, 1))
-
-        o += (o - m) / (self.__K - 1)
-
-        for i in range(self.__K):
-            f = o[:, i] > 0
-            r[i] = dict(sorted(zip(np.array(v)[f], o[:, i][f]), key=lambda x: x[1], reverse=True))
-
-        return r
+        phi = np.array([{} for _ in range(self.__K)])
+        for z in range(self.__K):
+            pos = o[z, :] > 0
+            phi[z] = dict(sorted(zip(self.__vocab[pos], o[z, :][pos]), key=lambda x: x[1], reverse=True))
+        return phi
 
     def get_clust_info(self):
         '''

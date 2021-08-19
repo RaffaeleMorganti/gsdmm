@@ -3,7 +3,7 @@ from setuptools import setup
 setup(
     name='gsdmm',
     packages=['gsdmm'],
-    version=0.2,
+    version="0.2.1",
     description='GSDMM: Short text clustering',
     license='MIT',
     install_requires=['numpy', 'sklearn'],
