@@ -1,6 +1,7 @@
 from warnings import warn
 import numpy as np
 from sklearn.feature_extraction.text import CountVectorizer
+from itertools import chain
 
 _GSDMM_IMPORT_MISSING = {"WORDCLOUD": False}
 
@@ -44,13 +45,11 @@ class GSDMM:
         self.__vectorizer = CountVectorizer(**kwargs)
 
         # slots for computed variables
-        self.__tokenizer = None
         self.__number_docs = None
         self.__vocab = None
         self.__voc_len = None
         self.__clust_doc_count = None
         self.__clust_word_count = None
-        self.__vocab_indexer = None
         self.__train_matrix = None
 
     def get_params(self):
@@ -66,22 +65,21 @@ class GSDMM:
             'token': self.__vectorizer.get_params()
         }
 
-    def __vocab_index(self, token, add=False):
+    def __tokenize(self, docs):
         '''
-        return token position in vocab [store in dict and do in O(1)]
+        tokenize document using CountVectorizer and return:
+        (value count [int], index position [array(int)]
         '''
-        if token not in self.__vocab_indexer:
-            if not add:
-                return -1
-            self.__vocab_indexer[token] = int(np.where(self.__vocab == token)[0])
-        return self.__vocab_indexer[token]
+        tdm = self.__vectorizer.transform(docs).toarray()
+        res = [0] * tdm.shape[0]
 
-    def __tokenize(self, doc, add=False):
-        '''
-        tokenize document using CountVectorizer and return index position
-        '''
-        doc = np.array(self.__tokenizer(doc))
-        return np.array([self.__vocab_index(t, add) for t in doc[np.isin(doc, self.__vocab)]])
+        for i in range(tdm.shape[0]):
+            pos = tdm[i, :] > 0
+            voc = np.where(pos)[0]
+            n = tdm[i, pos]
+            res[i] = np.array(list(chain.from_iterable([[voc[j]] * n[j] for j in range(len(voc))])))
+
+        return tdm.sum(1), res
 
     def __clust_add(self, k, d, s):
         self.__clust_doc_count[k] += 1
@@ -107,29 +105,26 @@ class GSDMM:
 
         # setup tokenizer
         td_matrix = self.__vectorizer.fit_transform(docs).toarray()
-        self.__tokenizer = self.__vectorizer.build_analyzer()
         self.__vocab = np.array(self.__vectorizer.get_feature_names())
         self.__voc_len = len(self.__vocab)
         self.__train_matrix = np.zeros((self.__K, self.__voc_len))
-        self.__vocab_indexer = {}
 
         self.__number_docs = len(docs)
-        doc_t_count = td_matrix.sum(1)
-        doc_t_list = [0] * self.__number_docs
+        doc_t_count, doc_t_list = self.__tokenize(docs)
 
         # choose a random  initial cluster for the docs
         dz = self.__rng.integers(self.__K, size=self.__number_docs)
         # initialize the clusters
-
         for k in range(self.__number_docs):
-            doc_t_list[k] = self.__tokenize(docs[k], True)
             self.__clust_add(dz[k], td_matrix[k, :], doc_t_count[k])
 
+        idoc = np.arange(self.__number_docs)
         if self.__verbose:
             print("Model initialized")
         for i in range(self.__n_iters):
             trans = 0
-            for k in range(self.__number_docs):
+            self.__rng.shuffle(idoc)
+            for k in idoc:
                 # remove the doc from it's current cluster
                 z_old = dz[k]
                 self.__clust_del(z_old, td_matrix[k, :], doc_t_count[k])
@@ -188,8 +183,7 @@ class GSDMM:
             A list with length n docs, each as K probability vector where each component
             represents the probability of the document appearing in a particular cluster
         '''
-        doc_t_count = self.__vectorizer.transform(docs).toarray().sum(1)
-        doc_t_list = [self.__tokenize(docs[k]) for k in range(len(docs))]
+        doc_t_count, doc_t_list = self.__tokenize(docs)
         return np.array([self.__score(doc_t_count[k], doc_t_list[k]) for k in range(len(docs))])
 
     def predict(self, docs):
@@ -200,16 +194,20 @@ class GSDMM:
         '''
         return self.predict_proba(docs).argmax(1)
 
-    def get_importances(self):
+    def get_importances(self, matrix=False):
         '''
         Word importance for each cluster (Implements formula (9) of Yin and Wang 2014)
-        :return: list of dict
-          for each cluster dict: word importances
+        :param matrix: return result as matrix or as list of dict
+        :return: [{word:importance}.] or (matrix[KxW],words)
+            for each cluster dict: word importances
         '''
         n = self.__train_matrix + self.__beta
         n[n == self.__beta] = 0
         d = self.__train_matrix.sum(1) + self.__voc_len * self.__beta
         r = n / d.reshape((self.__K, 1))
+
+        if matrix:
+            return r, self.__vocab
 
         phi = np.array([{} for _ in range(self.__K)])
         for z in range(self.__K):
@@ -217,12 +215,13 @@ class GSDMM:
             phi[z] = dict(sorted(zip(self.__vocab[pos], r[z, pos]), key=lambda x: x[1], reverse=True))
         return phi
 
-    def get_avg_importances(self):
+    def get_avg_importances(self, matrix=False):
         '''
-        NOTE: use importances to get importances as by Yin and Wang 2014
+        NOTE: use get_importances to get as by Yin and Wang 2014
         Relative word importance for each cluster
         avg_imp = imp[clust==k] - avg(imp[clust!=k])
-        :return: list of dict
+        :param matrix: return result as matrix or as list of dict
+        :return: [{word:importance}.] or (matrix[KxW],words)
           for each cluster dict: word importances
         '''
         n = self.__train_matrix + self.__beta
@@ -231,6 +230,10 @@ class GSDMM:
         o = n / d.reshape((self.__K, 1))
 
         o += (o - o.sum(0)) / (self.__K - 1)
+        o[o < 0] = 0
+
+        if matrix:
+            return o, self.__vocab
 
         phi = np.array([{} for _ in range(self.__K)])
         for z in range(self.__K):
@@ -251,7 +254,7 @@ class GSDMM:
 
         return np.c_[docs, words]
 
-    def get_wordclouds(self, imp, ncol=3, cloud={"background_color": "white"}, plot={}):
+    def get_wordclouds(self, imp, ncol=3, cloud={"background_color": "white"}, plot={}, names=None):
         '''
         Return matplotlib figure with wordclouds for each cluster
         :param imp:
@@ -262,6 +265,8 @@ class GSDMM:
             dict of WordCloud args (see wordcloud.WordCloud)
         :param plot: (optional)
             dict of figure args (see matplotlib.pyplot.figure)
+        :param names: (optional)
+            list of cluster names
         :return: matplotlib.pyplot.figure
         '''
         if _GSDMM_IMPORT_MISSING["WORDCLOUD"]:
@@ -269,13 +274,16 @@ class GSDMM:
                  "\nYou must install wordcloud, matplotlib (you can use 'pip install gsdmm[plot]')")
             return None
 
+        if names is None:
+            names = ["Cluster #%d" % i for i in range(len(imp))]
+
         wc = WordCloud(**cloud)
-        fig, axs = plt.subplots(int(np.ceil(self.__K / ncol)), ncol, **plot)
+        fig, axs = plt.subplots(int(np.ceil(len(imp) / ncol)), ncol, **plot)
         axs = np.array(axs).reshape(-1)
         [ax.axis("off") for ax in axs]
 
-        for i in range(self.__K):
-            axs[i].set_title("Cluster #%d" % i)
+        for i in range(len(imp)):
+            axs[i].set_title(names[i])
             if len(imp[i]) > 0:
                 axs[i].imshow(wc.generate_from_frequencies(imp[i]), interpolation='bilinear')
 
